@@ -13,6 +13,7 @@ import "package:locker/ui/components/add_to_collection_dialog.dart";
 import "package:locker/ui/components/file_edit_dialog.dart";
 import "package:locker/ui/components/selection_action_button_widget.dart";
 import "package:locker/ui/components/share_link_dialog.dart";
+import "package:locker/utils/collection_list_util.dart";
 import "package:locker/utils/file_util.dart";
 import "package:locker/utils/snack_bar_utils.dart";
 import "package:logging/logging.dart";
@@ -451,14 +452,13 @@ class _FileSelectionOverlayBarState extends State<FileSelectionOverlayBar> {
 
   Future<void> _showEditDialog(BuildContext context, EnteFile file) async {
     final allCollections = await CollectionService.instance.getCollections();
-    allCollections.removeWhere(
-      (c) => c.type == CollectionType.uncategorized,
-    );
+    final dedupedCollections = uniqueCollectionsById(allCollections);
 
     final result = await showFileEditDialog(
       context,
       file: file,
-      collections: allCollections,
+      collections: dedupedCollections,
+      snackBarContext: context,
     );
 
     if (result != null && context.mounted) {
@@ -471,21 +471,17 @@ class _FileSelectionOverlayBarState extends State<FileSelectionOverlayBar> {
       }
 
       final currentCollectionsSet = currentCollections.toSet();
-
-      final newCollectionsSet = result.selectedCollections.toSet();
-
+      final selectedCollectionsSet = result.selectedCollections.toSet();
       final collectionsToAdd =
-          newCollectionsSet.difference(currentCollectionsSet).toList();
-
-      final collectionsToRemove =
-          currentCollectionsSet.difference(newCollectionsSet).toList();
+          selectedCollectionsSet.difference(currentCollectionsSet).toList();
+      final hasCollectionAdds = collectionsToAdd.isNotEmpty;
 
       final currentTitle = file.displayName;
       final currentCaption = file.caption ?? '';
       final hasMetadataChanged =
           result.title != currentTitle || result.caption != currentCaption;
 
-      if (hasMetadataChanged || currentCollectionsSet != newCollectionsSet) {
+      if (hasMetadataChanged || hasCollectionAdds) {
         final dialog = createProgressDialog(
           context,
           context.l10n.pleaseWait,
@@ -510,12 +506,6 @@ class _FileSelectionOverlayBarState extends State<FileSelectionOverlayBar> {
 
           final List<Future<void>> apiCalls = [];
 
-          for (final collection in collectionsToRemove) {
-            apiCalls.add(
-              CollectionService.instance
-                  .move(file, collection, newCollectionsSet.first),
-            );
-          }
           if (hasMetadataChanged) {
             apiCalls.add(
               MetadataUpdaterService.instance
@@ -556,10 +546,12 @@ class _FileSelectionOverlayBarState extends State<FileSelectionOverlayBar> {
     }
 
     final allCollections = await CollectionService.instance.getCollections();
+    final dedupedCollections = uniqueCollectionsById(allCollections);
 
     final result = await showAddToCollectionDialog(
       context,
-      collections: allCollections,
+      collections: dedupedCollections,
+      snackBarContext: context,
     );
 
     if (result != null && context.mounted) {
@@ -704,8 +696,7 @@ class _FileSelectionOverlayBarState extends State<FileSelectionOverlayBar> {
 
   Future<void> _downloadFile(BuildContext context, EnteFile file) async {
     try {
-      final success =
-          await FileUtil.downloadFilesToDownloads(context, [file]);
+      final success = await FileUtil.downloadFilesToDownloads(context, [file]);
       if (success) {
         widget.selectedFiles.clearAll();
       }
