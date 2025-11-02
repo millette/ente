@@ -1,4 +1,4 @@
-import "package:ente_ui/components/buttons/models/button_result.dart";
+import "package:ente_ui/components/buttons/button_widget.dart" show ButtonAction;
 import "package:ente_ui/theme/ente_theme.dart";
 import "package:ente_ui/utils/dialog_util.dart";
 import "package:flutter/material.dart";
@@ -454,25 +454,27 @@ class _FileSelectionOverlayBarState extends State<FileSelectionOverlayBar> {
 
   Future<void> _showEditDialog(BuildContext context, EnteFile file) async {
     final allCollections = await CollectionService.instance.getCollections();
-    final dedupedCollections =
-        uniqueCollectionsById(allCollections, logger: _logger);
+    final dedupedCollections = uniqueCollectionsById(allCollections);
+
+    List<Collection> currentCollections;
+    try {
+      currentCollections =
+          await CollectionService.instance.getCollectionsForFile(file);
+    } catch (_) {
+      currentCollections = <Collection>[];
+    }
+    final initialSelectedIds =
+        currentCollections.map((collection) => collection.id).toSet();
 
     final result = await showFileEditDialog(
       context,
       file: file,
       collections: dedupedCollections,
       snackBarContext: context,
+      initialSelectedCollectionIds: initialSelectedIds,
     );
 
     if (result != null && context.mounted) {
-      List<Collection> currentCollections;
-      try {
-        currentCollections =
-            await CollectionService.instance.getCollectionsForFile(file);
-      } catch (e) {
-        currentCollections = <Collection>[];
-      }
-
       final currentCollectionsSet = currentCollections.toSet();
       final selectedCollectionsSet = result.selectedCollections.toSet();
       final collectionsToAdd =
@@ -552,8 +554,7 @@ class _FileSelectionOverlayBarState extends State<FileSelectionOverlayBar> {
       'Opening add-to dialog for ${files.length} file(s); fetching collections.',
     );
     final allCollections = await CollectionService.instance.getCollections();
-    final dedupedCollections =
-        uniqueCollectionsById(allCollections, logger: _logger);
+    final dedupedCollections = uniqueCollectionsById(allCollections);
     _logger.info(
       'Presenting ${dedupedCollections.length} unique collection option(s) '
       'to add files to.',
