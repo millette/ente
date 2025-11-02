@@ -24,14 +24,12 @@ class FileEditDialog extends StatefulWidget {
   final EnteFile file;
   final List<Collection> collections;
   final BuildContext snackBarContext;
-  final Set<int> initialSelectedCollectionIds;
 
   const FileEditDialog({
     super.key,
     required this.file,
     required this.collections,
     required this.snackBarContext,
-    this.initialSelectedCollectionIds = const <int>{},
   });
 
   @override
@@ -49,7 +47,6 @@ class _FileEditDialogState extends State<FileEditDialog> {
     super.initState();
 
     _availableCollections = uniqueCollectionsById(widget.collections);
-    _selectedCollectionIds.addAll(widget.initialSelectedCollectionIds);
 
     _titleController.text = widget.file.displayName;
 
@@ -236,7 +233,6 @@ Future<FileEditDialogResult?> showFileEditDialog(
   required EnteFile file,
   required List<Collection> collections,
   BuildContext? snackBarContext,
-  Set<int>? initialSelectedCollectionIds,
 }) async {
   return showDialog<FileEditDialogResult>(
     context: context,
@@ -244,8 +240,6 @@ Future<FileEditDialogResult?> showFileEditDialog(
       file: file,
       collections: collections,
       snackBarContext: snackBarContext ?? context,
-      initialSelectedCollectionIds:
-          initialSelectedCollectionIds ?? const <int>{},
     ),
   );
 }

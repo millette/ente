@@ -241,25 +241,22 @@ class FilePopupMenuWidget extends StatelessWidget {
     final allCollections = await CollectionService.instance.getCollections();
     final dedupedCollections = uniqueCollectionsById(allCollections);
 
-    List<Collection> currentCollections;
-    try {
-      currentCollections =
-          await CollectionService.instance.getCollectionsForFile(file);
-    } catch (_) {
-      currentCollections = <Collection>[];
-    }
-    final initialSelectedIds =
-        currentCollections.map((collection) => collection.id).toSet();
-
     final result = await showFileEditDialog(
       context,
       file: file,
       collections: dedupedCollections,
       snackBarContext: context,
-      initialSelectedCollectionIds: initialSelectedIds,
     );
 
     if (result != null && context.mounted) {
+      List<Collection> currentCollections;
+      try {
+        currentCollections =
+            await CollectionService.instance.getCollectionsForFile(file);
+      } catch (e) {
+        currentCollections = <Collection>[];
+      }
+
       final currentCollectionsSet = currentCollections.toSet();
       final selectedCollectionsSet = result.selectedCollections.toSet();
       final collectionsToAdd =
