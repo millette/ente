@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
@@ -48,6 +49,10 @@ class FileUploader {
       LinkedHashMap<String, BackupItem>();
   final kSafeBufferForLockExpiry = const Duration(hours: 4).inMicroseconds;
   final kBGTaskDeathTimeout = const Duration(seconds: 5).inMicroseconds;
+  final Queue<UploadURL> _uploadURLs = Queue<UploadURL>();
+
+  // Track used upload URLs to detect race conditions
+  final Map<String, DateTime> _usedUploadURLs = {};
 
   LinkedHashMap<String, BackupItem> get allBackups => _allBackups;
 
@@ -346,6 +351,13 @@ class FileUploader {
       );
       encFileSize = await encryptedFile.length();
 
+      // Validate stream encryption sizes - critical for data integrity
+      if (!_validateStreamEncryptionSizes(sourceFileSize, encFileSize)) {
+        throw EncSizeMismatchError(
+          "source $sourceFileSize, enc $encFileSize",
+        );
+      }
+
       final thumbnailData = base64Decode(blackThumbnailBase64);
       final encryptedThumbnailData = await CryptoUtil.encryptData(
         thumbnailData,
@@ -373,11 +385,22 @@ class FileUploader {
 
       // Calculate MD5 hashes for checksum verification
       final thumbnailMd5 = await computeMd5(encryptedThumbnailPath);
-      final fileMd5 = fileAttributes.fileMd5;
 
-      // Validate that MD5 was calculated during encryption
-      if (fileMd5 == null || fileMd5.isEmpty) {
-        throw Exception('File MD5 hash is null or empty');
+      // Get file MD5 - if not returned by encryption, compute it manually
+      String fileMd5;
+      if (fileAttributes.fileMd5 != null &&
+          fileAttributes.fileMd5!.isNotEmpty) {
+        fileMd5 = fileAttributes.fileMd5!;
+      } else {
+        _logger.warning(
+          'MD5 not returned from encryptFileWithMD5, computing manually',
+        );
+        fileMd5 = await computeMd5(encryptedFilePath);
+      }
+
+      // Validate that MD5 was calculated
+      if (fileMd5.isEmpty) {
+        throw Exception('File MD5 hash is empty after calculation');
       }
 
       _logger.info(
@@ -410,10 +433,10 @@ class FileUploader {
 
       final encryptedMetadataResult = await CryptoUtil.encryptData(
         utf8.encode(jsonEncode(enteFile.metadata)),
-        fileAttributes.key!,
+        fileAttributes.key,
       );
       final fileDecryptionHeader =
-          CryptoUtil.bin2base64(fileAttributes.header!);
+          CryptoUtil.bin2base64(fileAttributes.header);
       final thumbnailDecryptionHeader =
           CryptoUtil.bin2base64(encryptedThumbnailData.header!);
       final encryptedMetadata = CryptoUtil.bin2base64(
@@ -422,7 +445,7 @@ class FileUploader {
       final metadataDecryptionHeader =
           CryptoUtil.bin2base64(encryptedMetadataResult.header!);
       final encryptedFileKeyData = CryptoUtil.encryptSync(
-        fileAttributes.key!,
+        fileAttributes.key,
         CryptoHelper.instance.getCollectionKey(collection),
       );
       final encryptedKey =
@@ -436,7 +459,7 @@ class FileUploader {
         pubMetadataRequest = await getPubMetadataRequest(
           enteFile,
           pubMetadata,
-          fileAttributes.key!,
+          fileAttributes.key,
         );
       }
       final remoteFile = await _uploadFile(
@@ -654,11 +677,52 @@ class FileUploader {
     }
   }
 
-  // Fetch a fresh upload URL for each file with content length and MD5
+  // Add helper method for validating stream encryption sizes
+  bool _validateStreamEncryptionSizes(int sourceSize, int encryptedSize) {
+    // XChaCha20-Poly1305 adds 16 bytes MAC per chunk
+    // For a single chunk, overhead is header (24 bytes) + MAC (16 bytes) = 40 bytes
+    // For multiple chunks, the overhead varies based on chunk size
+    const minOverhead = 40;
+    const maxOverheadRatio = 0.01; // Allow up to 1% overhead for large files
+
+    final overhead = encryptedSize - sourceSize;
+    final maxOverhead = math.max(
+      minOverhead,
+      (sourceSize * maxOverheadRatio).ceil(),
+    );
+
+    if (overhead < minOverhead) {
+      _logger.severe(
+        'Encrypted size too small: source=$sourceSize, encrypted=$encryptedSize, overhead=$overhead',
+      );
+      return false;
+    }
+
+    if (overhead > maxOverhead + 1024) {
+      // Add 1KB buffer for metadata
+      _logger.severe(
+        'Encrypted size too large: source=$sourceSize, encrypted=$encryptedSize, overhead=$overhead',
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  // Clear cached upload URLs when needed
+  void clearCachedUploadURLs() {
+    _uploadURLs.clear();
+    _usedUploadURLs.clear();
+    _logger.info("Cleared upload URL cache and usage tracking");
+  }
+
+  // Fetch upload URLs with caching support
   Future<UploadURL> _getUploadURL({
     required int contentLength,
     required String md5,
   }) async {
+    // For now, always fetch fresh URL for consistency
+    // TODO: Implement URL caching like photos app
     try {
       final response = await _enteDio.post(
         "/files/upload-url",
@@ -667,9 +731,10 @@ class FileUploader {
           "contentMD5": md5,
         },
       );
-      return UploadURL.fromMap(
+      final uploadURL = UploadURL.fromMap(
         (response.data as Map).cast<String, dynamic>(),
       );
+      return _registerUploadURLUsage(uploadURL);
     } on DioException catch (e, s) {
       if (e.response != null) {
         if (e.response!.statusCode == 402) {
@@ -691,6 +756,30 @@ class FileUploader {
   void _onStorageLimitExceeded() {
     clearQueue(StorageLimitExceededError());
     throw StorageLimitExceededError();
+  }
+
+  UploadURL _registerUploadURLUsage(UploadURL uploadURL) {
+    // Atomic check-and-set to prevent race conditions in parallel uploads
+    final now = DateTime.now();
+    final existingTimestamp =
+        _usedUploadURLs.putIfAbsent(uploadURL.url, () => now);
+
+    if (existingTimestamp != now) {
+      throw DuplicateUploadURLError(
+        firstUsedAt: existingTimestamp,
+        duplicateUsedAt: now,
+      );
+    }
+    // Clean up old entries to prevent memory growth (only when > 5000 entries)
+    if (_usedUploadURLs.length > 5000) {
+      final oneHourAgo = now.subtract(const Duration(hours: 1));
+      _usedUploadURLs.removeWhere((key, value) => value.isBefore(oneHourAgo));
+      _logger.info(
+        "Cleaned up used upload URLs, remaining: ${_usedUploadURLs.length}",
+      );
+    }
+
+    return uploadURL;
   }
 
   Future<String> _putFile(
@@ -719,10 +808,25 @@ class FileUploader {
 
       return uploadURL.objectKey;
     } on DioException catch (e) {
-      if (e.message?.startsWith("HttpException: Content size") ?? false) {
+      // Check for MD5 checksum mismatch errors
+      if (e.response?.statusCode == 400 &&
+              e.response?.data.toString().contains('BadDigest') == true ||
+          e.response?.data.toString().contains('InvalidDigest') == true) {
+        final String recomputedMd5 = await computeMd5(file.path);
+        _logger.severe(
+          'MD5 mismatch: sent=$md5, recomputed=$recomputedMd5, response=${e.response?.data}',
+        );
+        throw BadMD5DigestError(
+          "Failed ${e.response?.data}, sent: $md5, computed: $recomputedMd5",
+        );
+      } else if (e.message?.startsWith("HttpException: Content size") ??
+          false) {
         rethrow;
       } else if (attempt < kMaximumUploadAttempts) {
-        _logger.info("Upload failed for $fileName, retrying");
+        _logger.info(
+          "Upload failed for $fileName (${e.response?.statusCode}), retrying attempt ${attempt + 1}",
+        );
+        // Get fresh upload URL for retry
         final newUploadURL = await _getUploadURL(
           contentLength: fileSize,
           md5: md5,
@@ -735,7 +839,7 @@ class FileUploader {
           attempt: attempt + 1,
         );
       } else {
-        _logger.info(
+        _logger.severe(
           "Failed to upload file ${basename(file.path)} after $attempt attempts",
           e,
         );

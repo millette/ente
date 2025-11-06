@@ -41,3 +41,33 @@ enum InvalidReason {
   tooLargeFile,
   unknown,
 }
+
+class BadMD5DigestError extends Error {
+  final String message;
+  BadMD5DigestError(this.message);
+
+  @override
+  String toString() => 'BadMD5DigestError: $message';
+}
+
+class EncSizeMismatchError extends Error {
+  final String message;
+  EncSizeMismatchError(this.message);
+
+  @override
+  String toString() => 'EncSizeMismatchError: $message';
+}
+
+class DuplicateUploadURLError extends Error {
+  final DateTime firstUsedAt;
+  final DateTime duplicateUsedAt;
+
+  DuplicateUploadURLError({
+    required this.firstUsedAt,
+    required this.duplicateUsedAt,
+  });
+
+  @override
+  String toString() =>
+      'DuplicateUploadURLError: URL was already used at $firstUsedAt, duplicate attempt at $duplicateUsedAt';
+}
